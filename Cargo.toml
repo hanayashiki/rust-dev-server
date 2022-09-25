@@ -1,0 +1,25 @@
+[package]
+name = "hello-rocket"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hyper = { version = "0.14", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+swc = "0.229.1"
+swc_config = "0.1.2"
+swc_core = { version = "0.27.1", features = [
+  "ecma_ast",
+  "common_concurrent",
+  "bundler",
+  "ecma_loader",
+  "base_node",
+  "base_concurrent",
+] }
+swc_ecma_loader = "0.41.0"
+swc_ecma_visit = "0.80.0"
+
+[profile.release]
+panic = 'abort'
