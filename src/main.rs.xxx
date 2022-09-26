@@ -1,0 +1,83 @@
+use std::{path::{PathBuf}, sync::Arc};
+
+use swc::{self, config::Options, try_with_handler, HandlerOpts};
+
+use swc_core::{
+    common::{FilePathMapping, SourceMap},
+};
+use swc_ecma_visit::{
+    noop_fold_type,
+    swc_ecma_ast::{ImportDecl, Module, Script},
+    Fold,
+};
+
+struct TransformImport {}
+
+impl Fold for TransformImport {
+    noop_fold_type!();
+
+    fn fold_import_decl(&mut self, n: ImportDecl) -> ImportDecl {
+        println!("fold_import_decl");
+        if !n.src.value.starts_with("/")
+            && !n.src.value.starts_with("./")
+            && !n.src.value.starts_with("../")
+        {
+            let mut cloned = n.clone();
+            cloned.src.value = "replaced".into();
+
+            return cloned;
+        }
+        return n;
+    }
+}
+
+struct Noop;
+impl Fold for Noop {
+    #[inline(always)]
+    fn fold_module(&mut self, m: Module) -> Module {
+        m
+    }
+
+    #[inline(always)]
+    fn fold_script(&mut self, s: Script) -> Script {
+        s
+    }
+}
+
+fn main() {
+    let cm = Arc::new(SourceMap::new(FilePathMapping::empty()));
+
+    let fm = cm.new_source_file(
+        swc_core::common::FileName::Real(PathBuf::from("main.tsx")),
+        "import React from 'preact/compat'; console.log(React);".to_string(),
+    );
+
+    let c = swc::Compiler::new(cm.clone());
+
+    let mut options = Options {
+        ..Default::default()
+    };
+
+    options.config.jsc.target = Some(swc_ecma_visit::swc_ecma_ast::EsVersion::Es2022);
+
+    let transform_import = TransformImport {};
+
+    let output = try_with_handler(
+        cm.clone(),
+        HandlerOpts {
+            ..Default::default()
+        },
+        |handler| {
+            c.process_js_with_custom_pass(
+                fm.clone(),
+                None,
+                handler,
+                &options,
+                |_, _| transform_import,
+                |_, _| Noop {},
+            )
+        },
+    );
+
+    println!("{}", output.unwrap().code);
+}

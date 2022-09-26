@@ -22,4 +22,5 @@ swc_ecma_loader = "0.41.0"
 swc_ecma_visit = "0.80.0"
 
 [profile.release]
-panic = 'abort'
+debug = true
+lto = true

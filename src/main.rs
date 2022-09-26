@@ -3,8 +3,8 @@
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server, StatusCode};
 use std::convert::Infallible;
-use std::error::Error;
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use std::{
     env, fs,
@@ -62,26 +62,23 @@ impl<'a> Fold for TransformImport<'a> {
     noop_fold_type!();
 
     fn fold_import_decl(&mut self, n: ImportDecl) -> ImportDecl {
-        if !n.src.value.starts_with("/")
-            || !n.src.value.starts_with("./")
-            || !n.src.value.starts_with("../")
-        {
-            let resolver = NodeModulesResolver::new(TargetEnv::Browser, Default::default(), false);
-            let resolved_path = resolver
-                .resolve(&FileName::Real(self.path.into()), n.src.value.as_ref())
-                .unwrap()
-                .to_string();
-            let mut cloned = n.clone();
-            cloned.src.value = resolved_path.strip_prefix(self.root).unwrap().into();
-            return cloned;
-        }
-        return n;
+        let t_start = Instant::now();
+
+        let resolver = NodeModulesResolver::new(TargetEnv::Browser, Default::default(), false);
+        let resolved_path = resolver
+            .resolve(&FileName::Real(self.path.into()), n.src.value.as_ref())
+            .unwrap()
+            .to_string();
+        let mut cloned = n.clone();
+        cloned.src.raw = None;
+        cloned.src.value = resolved_path.strip_prefix(self.root).unwrap().into();
+        return cloned;
     }
 
     fn fold_named_export(&mut self, n: NamedExport) -> NamedExport {
-        if !n.src.as_ref().map_or(true, |s| {
-            s.value.starts_with("/") || s.value.starts_with("./") || s.value.starts_with("../")
-        }) {
+        let t_start = Instant::now();
+
+        if n.src.is_some() {
             let resolver = NodeModulesResolver::new(TargetEnv::Browser, Default::default(), false);
             let resolved_path = resolver
                 .resolve(
@@ -94,26 +91,34 @@ impl<'a> Fold for TransformImport<'a> {
             cloned.src = Some(Box::new(
                 resolved_path.strip_prefix(self.root).unwrap().into(),
             ));
+
+            println!(
+                "{:?} resolve used {:?}ms",
+                n.src.unwrap().value,
+                Instant::now().duration_since(t_start).as_micros()
+            );
             return cloned;
         }
         return n;
     }
 
     fn fold_export_all(&mut self, n: ExportAll) -> ExportAll {
-        if !n.src.value.starts_with("/")
-            || !n.src.value.starts_with("./")
-            || !n.src.value.starts_with("../")
-        {
-            let resolver = NodeModulesResolver::new(TargetEnv::Browser, Default::default(), false);
-            let resolved_path = resolver
-                .resolve(&FileName::Real(self.path.into()), n.src.value.as_ref())
-                .unwrap()
-                .to_string();
-            let mut cloned = n.clone();
-            cloned.src.value = resolved_path.strip_prefix(self.root).unwrap().into();
-            return cloned;
-        }
-        return n;
+        let t_start = Instant::now();
+
+        let resolver = NodeModulesResolver::new(TargetEnv::Browser, Default::default(), false);
+        let resolved_path = resolver
+            .resolve(&FileName::Real(self.path.into()), n.src.value.as_ref())
+            .unwrap()
+            .to_string();
+        let mut cloned = n.clone();
+        cloned.src.value = resolved_path.strip_prefix(self.root).unwrap().into();
+        cloned.src.raw = None;
+        println!(
+            "{:?} resolve used {:?}ms",
+            n.src.value,
+            Instant::now().duration_since(t_start).as_micros()
+        );
+        return cloned;
     }
 }
 
@@ -129,8 +134,15 @@ static SWC_OPTS: Lazy<swc_core::base::HandlerOpts> = Lazy::new(|| swc_core::base
 
 async fn hello_world(req: Request<Body>) -> Result<Response<String>, Infallible> {
     let path = Path::new(ROOT.clone().as_ref()).join(&req.uri().path()[1..]);
-
+    let t_load_start = Instant::now();
     let file = tokio::fs::read_to_string(&path).await;
+    let t_load_end = Instant::now();
+
+    println!(
+        "{:?} read_to_string used {:?}ms",
+        req.uri(),
+        t_load_end.duration_since(t_load_start).as_micros()
+    );
 
     let mut builder = Response::builder().status(StatusCode::OK);
 
@@ -156,6 +168,7 @@ async fn hello_world(req: Request<Body>) -> Result<Response<String>, Infallible>
             {
                 let c = get_compiler();
 
+                let mut t_process_start = Instant::now();
                 let code = try_with_handler(c.cm.clone(), SWC_OPTS.clone(), |handler| {
                     let cloned_path = path.clone();
                     let transform_import = TransformImport {
@@ -163,24 +176,39 @@ async fn hello_world(req: Request<Body>) -> Result<Response<String>, Infallible>
                         path: cloned_path.as_path().to_str().unwrap(),
                     };
 
-                    let options = Options {
+                    let mut options = Options {
                         ..Default::default()
                     };
 
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        c.process_js_with_custom_pass(
-                            c.cm.new_source_file(FileName::Real(path), content),
-                            None,
-                            handler,
-                            &options,
-                            |_, _| noop(),
-                            |_, _| transform_import,
-                        )
-                    }));
-                    let code = result.unwrap().unwrap().code;
+                    options.config.jsc.target = Some(swc_ecma_visit::swc_ecma_ast::EsVersion::Es2022);
+
+                    t_process_start = Instant::now();
+                    let result = c.process_js_with_custom_pass(
+                        c.cm.new_source_file(FileName::Real(path), content),
+                        None,
+                        handler,
+                        &options,
+                        |_, _| transform_import,
+                        |_, _| noop(),
+                    );
+                    let code = result.unwrap().code;
                     return Ok(code);
                 })
                 .unwrap();
+
+                let t_process_end = Instant::now();
+
+                println!(
+                    "{:?} process used {:?}ms",
+                    req.uri(),
+                    t_process_end.duration_since(t_process_start).as_micros()
+                );
+
+                println!(
+                    "{:?} used {:?}ms",
+                    req.uri(),
+                    t_process_end.duration_since(t_load_start).as_micros()
+                );
 
                 return Ok(builder
                     .header("Content-Type", "application/javascript")
